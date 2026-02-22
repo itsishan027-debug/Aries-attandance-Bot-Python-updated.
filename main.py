@@ -1,13 +1,32 @@
 import discord
-from discord.ext import commands
-import random
-from datetime import datetime, timezone
 import os
 import psutil
+import logging
+import sqlite3
+import asyncio
+from datetime import datetime, timezone
+from discord.ext import commands
 from flask import Flask
 from threading import Thread
 
-# --- RENDER KEEP-ALIVE (Crash Proofing) ---
+# --- 1. ADVANCED LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+logger = logging.getLogger("AriesBot")
+
+# --- 2. DATABASE LAYER (Session Persistence) ---
+def init_db():
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS sessions 
+                          (user_id INTEGER PRIMARY KEY, start_time TIMESTAMP)''')
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"DB Init Error: {e}")
+
+# --- 3. RENDER KEEP-ALIVE ---
 app = Flask('')
 @app.route('/')
 def home():
@@ -15,147 +34,113 @@ def home():
 
 def run_flask():
     try: app.run(host='0.0.0.0', port=8080)
-    except Exception as e: print(f"Flask Error: {e}")
+    except Exception as e: logger.error(f"Flask Error: {e}")
 
 def keep_alive():
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
 
-# --- BOT CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN") 
-APP_ID = os.getenv("APPLICATION_ID")
+# --- 4. BOT CONFIGURATION ---
+TOKEN = os.getenv("DISCORD_TOKEN")
 TARGET_SERVER_ID = 770004215678369883
 TARGET_CHANNEL_ID = 1426247870495068343
-LEADER_ROLE_ID = 1412430417578954983 
+LEADER_ROLE_ID = 1412430417578954983
 
 class AriesBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
-        intents.message_content = True 
-        super().__init__(
-            command_prefix="!", 
-            intents=intents, 
-            application_id=APP_ID,
-            reconnect=True
-        )
-        self.active_sessions = {}
+        intents.message_content = True
+        super().__init__(command_prefix="!", intents=intents)
         self.start_time = datetime.now(timezone.utc)
 
 bot = AriesBot()
 
-# --- DIAGNOSTICS HELPER ---
-def get_bot_uptime():
-    delta = datetime.now(timezone.utc) - bot.start_time
-    hours, remainder = divmod(int(delta.total_seconds()), 3600)
-    minutes, _ = divmod(remainder, 60)
-    return f"{hours}h {minutes}m"
+# --- 5. CORE ATTENDANCE ENGINE (Robust Class) ---
+class AttendanceService:
+    @staticmethod
+    def log_online(user_id):
+        conn = sqlite3.connect('attendance.db')
+        conn.execute("INSERT OR REPLACE INTO sessions VALUES (?, ?)", 
+                     (user_id, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+        conn.close()
 
-# --- COMMANDS ---
+    @staticmethod
+    def get_start_time(user_id):
+        conn = sqlite3.connect('attendance.db')
+        data = conn.execute("SELECT start_time FROM sessions WHERE user_id=?", (user_id,)).fetchone()
+        conn.close()
+        return datetime.fromisoformat(data[0]) if data else None
+
+    @staticmethod
+    def log_offline(user_id):
+        conn = sqlite3.connect('attendance.db')
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.commit()
+        conn.close()
+
+# --- 6. COMMANDS & EVENTS ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def status(ctx):
-    latency = round(bot.latency * 1000)
     try:
-        memory = psutil.Process(os.getpid()).memory_info().rss / 1024**2
-    except:
-        memory = 0.0
-    
-    embed = discord.Embed(title="⚙️ Aries Self-Diagnostic", color=0x3498db)
-    embed.add_field(name="📡 Latency", value=f"`{latency}ms`", inline=True)
-    embed.add_field(name="⏳ Uptime", value=f"`{get_bot_uptime()}`", inline=True)
-    embed.add_field(name="💾 RAM", value=f"`{memory:.1f}MB`", inline=True)
-    embed.add_field(name="🛡️ Protection", value="`MAX (Auto-Heal Enabled)`", inline=False)
-    await ctx.send(embed=embed)
+        mem = psutil.Process(os.getpid()).memory_info().rss / 1024**2
+        uptime = datetime.now(timezone.utc) - bot.start_time
+        embed = discord.Embed(title="⚙️ Aries Titan Diagnostic", color=0x3498db)
+        embed.add_field(name="📡 Latency", value=f"`{round(bot.latency * 1000)}ms`")
+        embed.add_field(name="⏳ Uptime", value=f"`{uptime.total_seconds() // 3600}h`")
+        embed.add_field(name="💾 RAM", value=f"`{mem:.1f}MB`")
+        embed.add_field(name="🛡️ System", value="`STABLE - DB CONNECTED`")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        logger.error(f"Status Error: {e}")
 
-# --- MAIN ENGINE (Attendance + Greetings) ---
 @bot.event
 async def on_message(message):
-    try:
-        if message.author == bot.user: return
-        # Command processing sabse pehle taaki status command chal sake
-        await bot.process_commands(message)
-        
-        # Core Attendance Logic
-        if message.guild is None or message.guild.id != TARGET_SERVER_ID: return
-        if message.channel.id != TARGET_CHANNEL_ID: return
+    if message.author.bot: return
+    
+    # Process commands
+    await bot.process_commands(message)
 
+    if message.guild and message.guild.id == TARGET_SERVER_ID and message.channel.id == TARGET_CHANNEL_ID:
         content = message.content.lower().strip()
         user = message.author
-        now = datetime.now(timezone.utc)
-        timestamp = int(now.timestamp())
         is_leader = any(role.id == LEADER_ROLE_ID for role in user.roles)
 
-        # --- ONLINE ---
         if content == "online":
-            try: await message.delete()
-            except: pass
-
-            if user.id not in bot.active_sessions:
-                bot.active_sessions[user.id] = now
-                
-                if is_leader:
-                    greeting = f"🛡️ **Order is restored. Leader {user.display_name} is watching.**"
-                    msg_color = 0xf1c40f
-                else:
-                    greeting = f"✅ **{user.display_name}** has started their session."
-                    msg_color = 0x2ecc71
-
-                embed = discord.Embed(title="Status: ONLINE", description=greeting, color=msg_color)
-                # Avatar check to avoid crash if user has no avatar
-                if user.display_avatar:
-                    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-                    embed.set_thumbnail(url=user.display_avatar.url)
-                
-                embed.add_field(name="Arrival", value=f"🕒 <t:{timestamp}:t>")
+            if AttendanceService.get_start_time(user.id) is None:
+                AttendanceService.log_online(user.id)
+                embed = discord.Embed(title="Status: ONLINE", description=f"🛡️ **Leader {user.display_name} is watching.**" if is_leader else f"✅ **{user.display_name}** session started.", color=0xf1c40f if is_leader else 0x2ecc71)
+                embed.add_field(name="Arrival", value=f"<t:{int(datetime.now(timezone.utc).timestamp())}:t>")
                 await message.channel.send(embed=embed)
-            else:
-                await message.channel.send(f"⚠️ {user.mention}, already online!", delete_after=3)
-
-        # --- OFFLINE ---
+                try: await message.delete()
+                except: pass
+        
         elif content == "offline":
-            try: await message.delete()
-            except: pass
-
-            if user.id in bot.active_sessions:
-                start_time = bot.active_sessions[user.id]
-                duration = now - start_time
-                
-                # --- LEADER CUSTOM MESSAGE ---
-                if is_leader:
-                    status_msg = f"Leader **{user.display_name}** is offline — <@&1018171797126004827> take charge, **ARIES Citizen** stay active, track the leaderboard, and hold our clan position."
-                    msg_color = 0x2f3136
-                else:
-                    status_msg = f"🔴 **{user.display_name}** session ended."
-                    msg_color = 0xe74c3c
-
-                hours, remainder = divmod(int(duration.total_seconds()), 3600)
-                minutes, _ = divmod(remainder, 60)
-                duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-
-                embed = discord.Embed(title="Status: OFFLINE", description=status_msg, color=msg_color)
-                if user.display_avatar:
-                    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-                
-                embed.add_field(name="Logged In", value=f"🕒 <t:{int(start_time.timestamp())}:t>", inline=True)
-                embed.add_field(name="Logged Out", value=f"🕒 <t:{timestamp}:t>", inline=True)
-                embed.add_field(name="Total Session", value=f"⏳ `{duration_str}`", inline=False)
-                
+            start_time = AttendanceService.get_start_time(user.id)
+            if start_time:
+                duration = datetime.now(timezone.utc) - start_time
+                AttendanceService.log_offline(user.id)
+                status_msg = f"Leader **{user.display_name}** is offline." if is_leader else f"🔴 **{user.display_name}** session ended."
+                embed = discord.Embed(title="Status: OFFLINE", description=status_msg, color=0x2f3136 if is_leader else 0xe74c3c)
+                embed.add_field(name="Duration", value=f"`{int(duration.total_seconds()//3600)}h {int((duration.total_seconds()%3600)//60)}m`")
                 await message.channel.send(embed=embed)
-                del bot.active_sessions[user.id]
-            else:
-                await message.channel.send(f"❓ {user.mention}, you were not marked online.", delete_after=3)
-
-    except Exception as e:
-        print(f"Max Protection Log Error: {e}")
+                try: await message.delete()
+                except: pass
 
 @bot.event
 async def on_ready():
-    print(f'✅ {bot.user} Deployment Successful!')
+    init_db()
+    logger.info(f"Bot connected as {bot.user}")
 
+# --- 7. FINAL BOOT ---
 if __name__ == "__main__":
-    keep_alive()
-    if TOKEN:
-        bot.run(TOKEN)
-        
+    try:
+        keep_alive()
+        if TOKEN:
+            bot.run(TOKEN)
+    except Exception as e:
+        logger.critical(f"FATAL SYSTEM FAILURE: {e}")
+    
