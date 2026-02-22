@@ -59,7 +59,7 @@ async def status(ctx):
     latency = round(bot.latency * 1000)
     memory = psutil.Process(os.getpid()).memory_info().rss / 1024**2
     
-    embed = discord.Embed(title="⚙️ Aries Self-Diagnostic", color=0x3498db)
+    embed = discord.Embed(title="⚙️ Self-Diagnostic", color=0x3498db)
     embed.add_field(name="📡 Latency", value=f"`{latency}ms`", inline=True)
     embed.add_field(name="⏳ Uptime", value=f"`{get_bot_uptime()}`", inline=True)
     embed.add_field(name="💾 RAM", value=f"`{memory:.1f}MB`", inline=True)
@@ -114,7 +114,7 @@ async def on_message(message):
                 
                 # --- LEADER CUSTOM MESSAGE ---
                 if is_leader:
-                    status_msg = f"Leader **{user.display_name}** is offline — <@&1018171797126004827> stay active, **ARIES Citizen** take charge, track the leaderboard, and hold our clan position."
+                    status_msg = f"Leader **{user.display_name}** is offline — <@&1018171797126004827> take charge, **ARIES Citizen** stay active, track the leaderboard, and hold our clan position."
                     msg_color = 0x2f3136
                 else:
                     status_msg = f"🔴 **{user.display_name}** session ended."
