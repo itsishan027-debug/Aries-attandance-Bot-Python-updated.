@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import psutil
 from flask import Flask
@@ -41,13 +41,13 @@ class AriesBot(commands.Bot):
             reconnect=True
         )
         self.active_sessions = {}
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
 
 bot = AriesBot()
 
 # --- DIAGNOSTICS HELPER ---
 def get_bot_uptime():
-    delta = datetime.utcnow() - bot.start_time
+    delta = datetime.now(timezone.utc) - bot.start_time
     hours, remainder = divmod(int(delta.total_seconds()), 3600)
     minutes, _ = divmod(remainder, 60)
     return f"{hours}h {minutes}m"
@@ -57,13 +57,16 @@ def get_bot_uptime():
 @commands.has_permissions(administrator=True)
 async def status(ctx):
     latency = round(bot.latency * 1000)
-    memory = psutil.Process(os.getpid()).memory_info().rss / 1024**2
+    try:
+        memory = psutil.Process(os.getpid()).memory_info().rss / 1024**2
+    except:
+        memory = 0.0
     
-    embed = discord.Embed(title="⚙️ Self-Diagnostic", color=0x3498db)
+    embed = discord.Embed(title="⚙️ Aries Self-Diagnostic", color=0x3498db)
     embed.add_field(name="📡 Latency", value=f"`{latency}ms`", inline=True)
     embed.add_field(name="⏳ Uptime", value=f"`{get_bot_uptime()}`", inline=True)
     embed.add_field(name="💾 RAM", value=f"`{memory:.1f}MB`", inline=True)
-    embed.add_field(name="🛡️ Protection", value="`MAX (Auto-Heal)`", inline=False)
+    embed.add_field(name="🛡️ Protection", value="`MAX (Auto-Heal Enabled)`", inline=False)
     await ctx.send(embed=embed)
 
 # --- MAIN ENGINE (Attendance + Greetings) ---
@@ -71,12 +74,16 @@ async def status(ctx):
 async def on_message(message):
     try:
         if message.author == bot.user: return
+        # Command processing sabse pehle taaki status command chal sake
+        await bot.process_commands(message)
+        
+        # Core Attendance Logic
         if message.guild is None or message.guild.id != TARGET_SERVER_ID: return
         if message.channel.id != TARGET_CHANNEL_ID: return
 
         content = message.content.lower().strip()
         user = message.author
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         timestamp = int(now.timestamp())
         is_leader = any(role.id == LEADER_ROLE_ID for role in user.roles)
 
@@ -96,8 +103,11 @@ async def on_message(message):
                     msg_color = 0x2ecc71
 
                 embed = discord.Embed(title="Status: ONLINE", description=greeting, color=msg_color)
-                embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-                embed.set_thumbnail(url=user.display_avatar.url)
+                # Avatar check to avoid crash if user has no avatar
+                if user.display_avatar:
+                    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+                    embed.set_thumbnail(url=user.display_avatar.url)
+                
                 embed.add_field(name="Arrival", value=f"🕒 <t:{timestamp}:t>")
                 await message.channel.send(embed=embed)
             else:
@@ -125,7 +135,8 @@ async def on_message(message):
                 duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
                 embed = discord.Embed(title="Status: OFFLINE", description=status_msg, color=msg_color)
-                embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+                if user.display_avatar:
+                    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
                 
                 embed.add_field(name="Logged In", value=f"🕒 <t:{int(start_time.timestamp())}:t>", inline=True)
                 embed.add_field(name="Logged Out", value=f"🕒 <t:{timestamp}:t>", inline=True)
@@ -136,10 +147,8 @@ async def on_message(message):
             else:
                 await message.channel.send(f"❓ {user.mention}, you were not marked online.", delete_after=3)
 
-        await bot.process_commands(message)
-
     except Exception as e:
-        print(f"Max Protection Log: {e}")
+        print(f"Max Protection Log Error: {e}")
 
 @bot.event
 async def on_ready():
@@ -149,4 +158,4 @@ if __name__ == "__main__":
     keep_alive()
     if TOKEN:
         bot.run(TOKEN)
-
+            
